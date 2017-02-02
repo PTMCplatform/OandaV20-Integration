@@ -1,0 +1,6 @@
+D:\PFSoftGit\OandaV20IntegrationExample\OandaV20ExternalVendor\bin\Debug\OandaV20Vendor.dll
+D:\PFSoftGit\OandaV20IntegrationExample\OandaV20ExternalVendor\bin\Debug\OandaV20Vendor.pdb
+D:\PFSoftGit\OandaV20IntegrationExample\OandaV20ExternalVendor\bin\Debug\PlatformAPI.dll
+D:\PFSoftGit\OandaV20IntegrationExample\OandaV20ExternalVendor\obj\Debug\OandaV20Vendor.csprojResolveAssemblyReference.cache
+D:\PFSoftGit\OandaV20IntegrationExample\OandaV20ExternalVendor\obj\Debug\OandaV20Vendor.dll
+D:\PFSoftGit\OandaV20IntegrationExample\OandaV20ExternalVendor\obj\Debug\OandaV20Vendor.pdb
