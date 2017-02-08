@@ -1,18 +1,266 @@
 // Copyright PFSOFT LLC. © 2003-2017. All rights reserved.
 
-using ExternalVendor;
+using PlatformAPI.Integration;
 using OandaV20ExternalVendor.TradeLibrary;
 using OandaV20ExternalVendor.TradeLibrary.DataTypes;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Web;
+using System.Windows.Forms;
 
 namespace OandaV20ExternalVendor
 {
     public class OandaV20Utils
     {
+        #region OAuth authorization
+
+        public static string AccessToken;
+
+        static Form form;
+
+        delegate void GetTokenFromWebDelegate(string clientID, string redirectUrl, Action<string> callback, string FUser, string FPassword);
+
+        public static string GetTokenFromWebasync(string clientID, string redirectUrl, string FUser, string FPassword, Control invoker)
+        {
+            AccessToken = string.Empty;
+            if (invoker == null)
+                return "error";
+
+            string requestTokenError = null;
+            
+            Action<string> callback = delegate (string error)
+            {
+                requestTokenError = error;
+                Console.WriteLine("OANDA. Error: {0}", error);
+            };
+
+            invoker.BeginInvoke(new GetTokenFromWebDelegate(GetTokenFromWeb), new object[] { clientID, redirectUrl, callback, FUser, FPassword });
+            
+            var startTime = DateTime.Now;
+            while (string.IsNullOrEmpty(requestTokenError))
+            {
+                System.Windows.Forms.Application.DoEvents();
+
+                if (!string.IsNullOrEmpty(AccessToken) || (DateTime.Now - startTime).TotalSeconds > 120)
+                    break;
+            }
+
+            DestroyWebForm();
+
+            return requestTokenError;
+        }
+
+        static internal void DestroyWebForm()
+        {
+            try
+            {
+                if (form != null)
+                {
+                    if (form.IsHandleCreated)
+                    {
+                        form.BeginInvoke(new Action(() =>
+                        {
+                            try
+                            {
+                                if (form != null && form.IsHandleCreated)
+                                {
+                                    form.Close();
+                                    form.Dispose();
+                                }
+                            }
+                            catch { }
+                            form = null;
+                        }
+                            ));
+                    }
+                    else
+                    {
+                        form.Close();
+                        form = null;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        static private void GetTokenFromWeb(string clientID, string redirectUrl, Action<string> callback, string FUser, string FPassword)
+        {
+            //const string redirect = "https://api-sandbox.oanda.com/index.html";
+            //const string clientId = "g6E5XbvB28Ph9Kin";
+            const string scopes = "read+trade+marketdata+stream";
+
+            // create a random state string
+            var rand = new Random();
+            string state = "fnuajuiwqnzpofmAHAAJfNMLKAOW9mvm9r201jmpmfpa" + rand.Next() + rand.Next() + rand.Next();
+
+            string requestURL = Credentials.GetDefaultCredentials().GetServer(EServer.Account) + @"/oauth2/authorize?client_id=" +
+                                Uri.EscapeDataString(clientID) + "&redirect_uri=" + Uri.EscapeDataString(redirectUrl) +
+                                "&state=" + Uri.EscapeDataString(state) + "&response_type=token&scope=" + Uri.EscapeDataString(scopes);
+
+            Uri startUri = new Uri(requestURL);
+
+            try
+            {
+
+                form = new Form();
+                if (Control.ModifierKeys == Keys.Control)
+                {
+                    form.ShowInTaskbar = false;
+                    form.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
+                    form.Bounds = new System.Drawing.Rectangle(0, 0, 300, 300);
+                }
+                else
+                {
+                    form.ShowInTaskbar = false;
+                    form.StartPosition = System.Windows.Forms.FormStartPosition.Manual;
+                    form.Bounds = new System.Drawing.Rectangle(-100000, -100000, 1000, 1000);
+                }
+                //form.WindowState = FormWindowState.Maximized;
+                var webBrowser = new WebBrowser();
+                webBrowser.Navigated += bc_LoadCompleted;
+                webBrowser.ScriptErrorsSuppressed = true;
+                webBrowser.Dock = DockStyle.Fill;
+
+
+                form.Controls.Add(webBrowser);
+
+                form.Show();
+
+                webBrowser.Navigate(requestURL);
+
+                WaitBrowserLoad(webBrowser);
+
+                if (webBrowser.Document == null)
+                {
+                    if (callback != null)
+                        callback("Connection timed out");
+                    return;
+                }
+
+                var usernameDOM = webBrowser.Document.GetElementById("username");
+                var passwordDOM = webBrowser.Document.GetElementById("password");
+
+                if (usernameDOM != null && passwordDOM != null)
+                {
+                    usernameDOM.SetAttribute("value", FUser);
+                    passwordDOM.SetAttribute("value", FPassword);
+
+                    // Auto click on Login button
+                    webBrowser.Document.GetElementById("submit").InvokeMember("click");
+                }
+
+                WaitBrowserLoad(webBrowser, 2);
+
+                var dTags = webBrowser.Document.Body.GetElementsByTagName("div");
+                foreach (System.Windows.Forms.HtmlElement div in dTags)
+                {
+                    if (div.GetAttribute("className") == @"error-msg")
+                    {
+                        if (callback != null)
+                            callback(div.Children[0].InnerText);
+                        return;
+                    }
+                }
+
+                Sleep();
+
+                //var pTags = webBrowser.Document.Body.GetElementsByTagName("p");
+                //foreach (System.Windows.Forms.HtmlElement p in pTags)
+                //{
+                //    if (p.GetAttribute("className") == @"v20-disclaimer v20-no-accounts")
+                //    {
+                //        if (callback != null)
+                //            callback("general.connection.WrongApiVersion");
+                //        return;
+                //    }
+                //}
+
+                var checkBoxes = webBrowser.Document.Body.GetElementsByTagName("input");
+                if (checkBoxes != null && checkBoxes.Count != 0)
+                    foreach (System.Windows.Forms.HtmlElement checkBox in checkBoxes)
+                        if (checkBox.GetAttribute("type") == "checkbox")
+                            checkBox.SetAttribute("checked", "checked");
+
+                WaitBrowserLoad(webBrowser);
+
+                Sleep();
+
+                bool dontFindAllowButton = true;
+
+                var buttons = webBrowser.Document.Body.GetElementsByTagName("button");
+                if (buttons != null && buttons.Count != 0)
+                    foreach (System.Windows.Forms.HtmlElement button in buttons)
+                        if (button.Name == "allow")
+                        {
+                            button.InvokeMember("click");
+                            dontFindAllowButton = false;
+                            break;
+                        }
+
+                if (dontFindAllowButton)
+                {
+                    if (callback != null)
+                        callback("User/password combination is not valid.");
+                    return;
+                }
+
+                Sleep();
+
+                WaitBrowserLoad(webBrowser);
+
+            }
+            catch (Exception ex)
+            {
+                if (callback != null)
+                    callback(ex.Message);
+            }
+        }
+
+        static private void bc_LoadCompleted(object sender, WebBrowserNavigatedEventArgs e)
+        {
+            var url = e.Url.Fragment;
+            if (url.Contains("access_token") || url.Contains("#"))
+            {
+                url = (new System.Text.RegularExpressions.Regex("#")).Replace(url, "?", 1);
+                AccessToken = HttpUtility.ParseQueryString(url).Get("access_token");
+            }
+        }
+
+        static void WaitBrowserLoad(System.Windows.Forms.WebBrowser browser, int defualtTime = 1)
+        {
+            var startTime = DateTime.Now;
+            while (true)
+            {
+                System.Windows.Forms.Application.DoEvents();
+
+                if (browser.IsDisposed || browser.ReadyState == System.Windows.Forms.WebBrowserReadyState.Complete && (DateTime.Now - startTime).TotalSeconds > defualtTime || (DateTime.Now - startTime).TotalSeconds > 10)
+                    break;
+            }
+        }
+
+
+        static void Sleep()
+        {
+            var startTime = DateTime.Now;
+            while (true)
+            {
+                System.Windows.Forms.Application.DoEvents();
+
+                if ((DateTime.Now - startTime).TotalSeconds > 5)
+                    break;
+            }
+        }
+
+        #endregion
+
+        const string KEY_GENERAL_GROUP = "panel.accountDetails.Groups.1.General";
+        const string KEY_MARGIN_GROUP = "panel.accountDetails.Groups.2.Margin";
+
         static List<string> CFDIndexInstruments = new List<string>
         {
               "AUSTRALIA 200",
@@ -155,7 +403,7 @@ namespace OandaV20ExternalVendor
         {
             switch (oandaTiff)
             {
-                case TimeInForceEnum.FOC:
+                case TimeInForceEnum.FOK:
                     return TimeInForce.FOC;
                 case TimeInForceEnum.GTD:
                     return TimeInForce.GTD;
@@ -174,7 +422,7 @@ namespace OandaV20ExternalVendor
             switch (tiff)
             {
                 case TimeInForce.FOC:
-                    return TimeInForceEnum.FOC;
+                    return TimeInForceEnum.FOK;
                 case TimeInForce.GTD:
                     return TimeInForceEnum.GTD;
                 case TimeInForce.IOC:
@@ -353,7 +601,7 @@ namespace OandaV20ExternalVendor
 
         const int LIMIT_THREAD_GENERATE_BAR_MESSAGES = 3;
         
-        internal static void GenerateDayBarMessages(ConcurrentDictionary<string, InstrumentOanda> instruments, CancellationToken cancellationToken, GetHistoryDelegate getHistory, NewQuoteDelegate newQuote)
+        internal static void GenerateDayBarMessages(ConcurrentDictionary<string, InstrumentOanda> instruments, CancellationToken cancellationToken, GetHistoryDelegate getHistory, Action<QuoteBase> newQuote)
         {
             SemaphoreSlim maxThread = new SemaphoreSlim(LIMIT_THREAD_GENERATE_BAR_MESSAGES);
 
@@ -386,7 +634,7 @@ namespace OandaV20ExternalVendor
             }
         }
 
-        internal static void GenerateDayBarMessages(InstrumentOanda instrument, CancellationToken token, GetHistoryDelegate getHistory, NewQuoteDelegate newQuote)
+        internal static void GenerateDayBarMessages(InstrumentOanda instrument, CancellationToken token, GetHistoryDelegate getHistory, Action<QuoteBase> newQuote)
         {
             var param = new HistoryRequestParameters();
             param.Symbol = instrument.Name.ToUpper();
@@ -395,7 +643,7 @@ namespace OandaV20ExternalVendor
             GenerateDayBarMessage(param, instrument, token, getHistory, newQuote);
         }
 
-        private static void GenerateDayBarMessage(HistoryRequestParameters param, InstrumentOanda instrument, CancellationToken token, GetHistoryDelegate getHistory, NewQuoteDelegate newQuote)
+        private static void GenerateDayBarMessage(HistoryRequestParameters param, InstrumentOanda instrument, CancellationToken token, GetHistoryDelegate getHistory, Action<QuoteBase> newQuote)
         {
             try
             {
@@ -449,7 +697,7 @@ namespace OandaV20ExternalVendor
         {
             switch (modifyData.OrderType)
             {
-                case ExternalVendor.OrderType.Market:
+                case OrderType.Market:
                     orderRequest.Order = new MarketOrderRequest()
                     {
                         Amount = (int)modifyData.Amount * (modifyData.Side == SideEnum.Buy ? 1 : -1),
@@ -459,7 +707,7 @@ namespace OandaV20ExternalVendor
                     };
                     break;
 
-                case ExternalVendor.OrderType.Limit:
+                case OrderType.Limit:
                     if (string.IsNullOrEmpty(modifyData.PositionID))
                         orderRequest.Order = new LimitOrderRequest()
                         {
@@ -467,7 +715,7 @@ namespace OandaV20ExternalVendor
                             InstrumentId = modifyData.Instrument.Id,
                             TimeInForce = OandaV20Utils.GetTiff(modifyData.TimeInForce),
                             Price = modifyData.Price,
-                            GTDTime = OandaV20Utils.GetOrderExpireDateByTIF(modifyData.TimeInForce, modifyData.OrderExpireDate, ExternalVendor.ExternalVendor.UtcNowSynchronized)
+                            GTDTime = OandaV20Utils.GetOrderExpireDateByTIF(modifyData.TimeInForce, modifyData.OrderExpireDate, Vendor.UtcNowSynchronized)
                         };
                     else
                     {
@@ -480,7 +728,7 @@ namespace OandaV20ExternalVendor
                     }
                     break;
 
-                case ExternalVendor.OrderType.Stop:
+                case OrderType.Stop:
                     if (string.IsNullOrEmpty(modifyData.PositionID))
                         orderRequest.Order = new StopOrderRequest()
                         {
@@ -488,7 +736,7 @@ namespace OandaV20ExternalVendor
                             InstrumentId = modifyData.Instrument.Id,
                             TimeInForce = OandaV20Utils.GetTiff(modifyData.TimeInForce),
                             Price = modifyData.Price,
-                            GTDTime = OandaV20Utils.GetOrderExpireDateByTIF(modifyData.TimeInForce, modifyData.OrderExpireDate, ExternalVendor.ExternalVendor.UtcNowSynchronized)
+                            GTDTime = OandaV20Utils.GetOrderExpireDateByTIF(modifyData.TimeInForce, modifyData.OrderExpireDate, Vendor.UtcNowSynchronized)
                         };
                     else
                     {
@@ -500,7 +748,7 @@ namespace OandaV20ExternalVendor
                         };
                     }
                     break;
-                case ExternalVendor.OrderType.TrailingStop:
+                case OrderType.TrailingStop:
                     if (!string.IsNullOrEmpty(modifyData.PositionID))
                     {
                         orderRequest.Order = new TrailingStopLossOrderRequest()
@@ -630,6 +878,51 @@ namespace OandaV20ExternalVendor
                 exp1 = symbol;
                 exp2 = "USD";
             }
+        }
+
+        internal static void FillAccountAditionalInfo(Account account, AccountState accountState)
+        {
+            account.AccountAdditionalInfo = new List<AccountAdditionalInfoItem>()
+                    {
+                        new AccountAdditionalInfoItem()
+                        {
+
+                            GroupInfo = KEY_GENERAL_GROUP,
+                            SortIndex = 1000,
+                            NameKey = "Withdrawal limit",
+                            APIKey = "Withdrawal limit",
+                            ToolTipKey = "Withdrawal limit",
+                            Value = accountState != null ? accountState.WithdrawalLimit : 0.0,
+                            DataType = AdditionalInfoItemComparingType.Double,
+                            Visible = true,
+                            FormatingType = AccountAdditionalInfoItemFormatingType.AssetBalance
+                        },
+                        new AccountAdditionalInfoItem()
+                        {
+
+                            GroupInfo = KEY_GENERAL_GROUP,
+                            SortIndex = 1001,
+                            NameKey = "Position value",
+                            APIKey = "Position value",
+                            ToolTipKey = "Position value",
+                            Value = accountState != null ? accountState.PositionValue : 0.0,
+                            DataType = AdditionalInfoItemComparingType.Double,
+                            Visible = true,
+                            FormatingType = AccountAdditionalInfoItemFormatingType.AssetBalance
+                        },
+                        new AccountAdditionalInfoItem()
+                        {
+                            GroupInfo = KEY_MARGIN_GROUP,
+                            SortIndex = 1000,
+                            NameKey = "Margin closeout value",
+                            APIKey = "Margin closeout value",
+                            ToolTipKey = "Margin closeout value",
+                            Value = accountState != null ?  accountState.MarginCloseoutNAV : 0.0,
+                            DataType = AdditionalInfoItemComparingType.Double,
+                            Visible = true,
+                            FormatingType = AccountAdditionalInfoItemFormatingType.AssetBalance
+                        }
+                     };
         }
     }
 

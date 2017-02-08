@@ -285,6 +285,8 @@ namespace OandaV20ExternalVendor.TradeLibrary
             catch (WebException ex)
             {
                 var serializer = new DataContractJsonSerializer(typeof(RequestError));
+                if (ex.Response == null)
+                    throw ex;
                 var stream = GetResponseStream(ex.Response);
                 try
                 {

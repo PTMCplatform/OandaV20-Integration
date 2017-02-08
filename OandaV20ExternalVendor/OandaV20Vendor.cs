@@ -1,6 +1,8 @@
 // Copyright PFSOFT LLC. © 2003-2017. All rights reserved.
 
-using ExternalVendor;
+//#define PUBLISH_FOR_GITHUB
+
+using PlatformAPI.Integration;
 using OandaV20ExternalVendor.TradeLibrary;
 using OandaV20ExternalVendor.TradeLibrary.DataTypes;
 using System;
@@ -16,8 +18,7 @@ using PTLRuntime.NETScript.Settings;
 
 namespace OandaV20ExternalVendor
 {
-    [ExternalVendor.VendorServicesAtribute]
-    public class OandaV20Vendor : ExternalVendor.ExternalVendor
+    public class OandaV20Vendor : PlatformAPI.Integration.Vendor
     {
         #region Properties/Const
 
@@ -26,9 +27,6 @@ namespace OandaV20ExternalVendor
         const string CONNECTION = "Connection";
         const string CONNECTION_DEMO = "Demo";
         const string CONNECTION_REAL = "Real";
-
-        const string KEY_GENERAL_GROUP = "panel.accountDetails.Groups.1.General";
-        const string KEY_MARGIN_GROUP = "panel.accountDetails.Groups.2.Margin";
 
         /// <summary>
         /// AccountsSummary cache
@@ -76,7 +74,7 @@ namespace OandaV20ExternalVendor
         /// <summary>
         /// Providing some information about vendor: name, registration link, etc. Terminal will use it in Login screen and Connection settings screen.
         /// </summary>        
-        public static VendorMetaData GetVendorMetaData()
+        public override VendorMetaData GetVendorMetaData()
         {
             VendorMetaData value = new VendorMetaData()
             {
@@ -90,7 +88,7 @@ namespace OandaV20ExternalVendor
         /// <summary>
         /// Define translations. Also we can use constant HIDDEN to hide unnecessary functionality.
         /// </summary>        
-        public static Hashtable GetLocalizationTable()
+        public override Hashtable GetLocalizationTable()
         {
             var locale = new Hashtable()
             {
@@ -277,7 +275,16 @@ namespace OandaV20ExternalVendor
                 {"panel.positions.menu.reverse.reverseAllBySymbol", HIDDEN },
                 {"panel.positions.menu.reverse.reverseAllForAccount", HIDDEN },
                 {"panel.positions.menu.reverse", HIDDEN },
-                {"panel.newOrderEntry.reversePosButton", HIDDEN }
+                {"panel.newOrderEntry.reversePosButton", HIDDEN },
+                {"panel.positions.Net_PL", HIDDEN },
+                {"panel.positions.Net_PL.descr", HIDDEN },
+                {"panel.positions.RealizedPnL", HIDDEN },
+                {"panel.positions.RealizedPnL.descr", HIDDEN },
+                {"panel.positions.profit_usd.InstrumentCurrency", "Gross P/L" },
+                {"panel.positions.Net_PL.InstrumentCurrency", "Net P/L" },
+                {"panel.positions.Net_PL.InstrumentCurrency.descr", "Net P/L" },
+                {"panel.positions.PL_ticks", HIDDEN },
+                {"panel.positions.profit_usd", HIDDEN }
             };
 
             return locale;
@@ -290,7 +297,7 @@ namespace OandaV20ExternalVendor
         /// <summary>
         /// Get connection settings. Oanda requires specified type of connection: Demo or Real.
         /// </summary>        
-        public static List<SettingItem> GetConnectionParameters()
+        public override List<SettingItem> GetConnectionParameters()
         {
             List<SettingItem> parameters = new List<SettingItem>();
 
@@ -321,19 +328,54 @@ namespace OandaV20ExternalVendor
             string user = string.Empty;
             string password = string.Empty;
 
-            settingItem = parameters.GetItemByName(ExternalVendor.ExternalVendor.LOGIN_PARAMETER_USER);
+            settingItem = parameters.GetItemByName(Vendor.LOGIN_PARAMETER_USER);
             if (settingItem != null && settingItem.Value is string)
                 user = (string)settingItem.Value;
-            settingItem = parameters.GetItemByName(ExternalVendor.ExternalVendor.LOGIN_PARAMETER_PASSWORD);
+            settingItem = parameters.GetItemByName(Vendor.LOGIN_PARAMETER_PASSWORD);
             if (settingItem != null && settingItem.Value is string)
                 password = (string)settingItem.Value;
 
             settingItem = parameters.GetItemByName(CONNECTION);
             if (settingItem != null && settingItem.Value is string)
                 isLive = (string)settingItem.Value == CONNECTION_REAL;
-            
+
+#if PUBLISH_FOR_GITHUB
+
             string returnedToken = password.Length > 20 ? password : string.Empty;
-            
+
+#else
+
+            Control invoker = null;
+            settingItem = parameters.GetItemByName("MainGUIControl");
+            if (settingItem != null && settingItem.Value is Control)
+                invoker = (Control)settingItem.Value;
+
+            string returnedToken = password.Length > 20 ? password : string.Empty;
+
+            Credentials.SetCredentials(isLive ? EEnvironment.Trade : EEnvironment.Practice, returnedToken);
+
+            if (string.IsNullOrEmpty(returnedToken))
+            {
+                string error = null;
+                if (isLive)
+                    error = OandaV20Utils.GetTokenFromWebasync("7pj8oP0HQ41dCXge", "https://cp.protrader.com/oauth.html", user, password, invoker);
+                else
+                    error = OandaV20Utils.GetTokenFromWebasync("62WGrveR6H8muPk9", "https://cp.protrader.com/oauth.html", user, password, invoker);
+
+                if (!string.IsNullOrEmpty(error))
+                {
+                    result.State = ConnectionState.Fail;
+                    result.Message = error;
+                    
+                    return result;
+                }
+
+                returnedToken = OandaV20Utils.AccessToken;
+            }
+
+#endif
+
+
             if (string.IsNullOrEmpty(returnedToken))
             {
                 result.State = ConnectionState.Fail;
@@ -422,7 +464,9 @@ namespace OandaV20ExternalVendor
                 account.UsedMargin = accountSummary.MarginUsed;
                 account.AvailableMargin = accountSummary.MarginAvaliable;
                 account.MaintranceMargin = accountSummary.MarginUsed;//??
-                
+
+                OandaV20Utils.FillAccountAditionalInfo(account, null);
+
                 accounts.Add(account);                
 
                 positions[accountSummary.Id] = new ConcurrentDictionary<string, Position>();
@@ -438,68 +482,69 @@ namespace OandaV20ExternalVendor
         {
             Dictionary<Rule, object> ruleSet = new Dictionary<Rule, object>();
 
-            ruleSet[Rule.VISIBILITY_INSTRUMENT_TYPE] = ExternalVendor.ExternalVendor.ALLOWED_FOR_ALL;
-            ruleSet[Rule.VISIBILITY_ROUTE] = ExternalVendor.ExternalVendor.ALLOWED_FOR_ALL;
+            ruleSet[Rule.VISIBILITY_INSTRUMENT_TYPE] = Vendor.ALLOWED_FOR_ALL;
+            ruleSet[Rule.VISIBILITY_ROUTE] = Vendor.ALLOWED_FOR_ALL;
 
-            ruleSet[Rule.FUNCTION_INSTRUMENT_PORTFOLIO] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_ORDER_BOOK] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_LEVEL2] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_SCALPER] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_INSTRUMENT_PORTFOLIO] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_ORDER_BOOK] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_LEVEL2] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_SCALPER] = Vendor.NOT_ALLOWED;
 
-            ruleSet[Rule.FUNCTION_OE2014] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_CHART] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_CHAT] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_NEWS] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_SHOW_ORDERS] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_SHOW_POSITIONS] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_ACCOUNTS] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_ACCOUNTPERFOMANCE] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_WATCHLIST] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_FXBOARD] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_LEVEL3] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_MATRIX] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_EVENT_LOG] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_POSITION_BALANCE] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_CUR_EXP] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_BUILDER] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_BASKET] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_SCRIPT_BUILDER] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_SYMBOL_INFO] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_GRID] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_OPTION_TRADER] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_MARGIN_INFO] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_OE2014] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_CHART] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_CHAT] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_NEWS] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_SHOW_ORDERS] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_SHOW_POSITIONS] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_ACCOUNTS] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_ACCOUNTPERFOMANCE] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_WATCHLIST] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_FXBOARD] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_LEVEL3] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_MATRIX] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_EVENT_LOG] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_POSITION_BALANCE] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_CUR_EXP] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_BUILDER] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_BASKET] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_SCRIPT_BUILDER] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_SYMBOL_INFO] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_GRID] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_OPTION_TRADER] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_MARGIN_INFO] = Vendor.NOT_ALLOWED;
 
-            ruleSet[Rule.SELF_TRADING] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_TRADING] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_REPORT] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_MUTUAL_CLOSE] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_PARTIAL_CLOSE] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_SLTP] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_TRAILING_STOP] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_BINDEDORDERS] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_TRADES] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.SELF_TRADING] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_TRADING] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_REPORT] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_MUTUAL_CLOSE] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_PARTIAL_CLOSE] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_SLTP] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_TRAILING_STOP] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_BINDEDORDERS] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_TRADES] = Vendor.ALLOWED;
 
-            ruleSet[Rule.FUNCTION_MODIFY_ORDERTYPE] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_MODIFY_AMOUNT] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_MODIFY_PRICE] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_MODIFY_TIF] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_MODIFY_ORDERTYPE] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_MODIFY_AMOUNT] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_MODIFY_PRICE] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_MODIFY_TIF] = Vendor.ALLOWED;
 
-            ruleSet[Rule.FUNCTION_AUTO_POPULATE_WATCHLIST] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_ADVANCED_OCO_MODE] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_AUTO_POPULATE_WATCHLIST] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_ADVANCED_OCO_MODE] = Vendor.NOT_ALLOWED;
 
-            ruleSet[Rule.FUNCTION_SCRIPT_BUILDER] = ExternalVendor.ExternalVendor.ALLOWED;
-            ruleSet[Rule.FUNCTION_TRAILING_SLTP_INOFFSET] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_SCRIPT_BUILDER] = Vendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_TRAILING_SLTP_INOFFSET] = Vendor.ALLOWED;
 
-            ruleSet[Rule.FUNCTION_DONT_USE_ROUTE_SETTING_FOR_CLOSE_TS_ORDER] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_DONT_USE_ROUTE_SETTING_FOR_CLOSE_TS_ORDER] = Vendor.ALLOWED;
 
-            ruleSet[Rule.FUNCTION_UPDATE_TRAILING_STOP_ON_NEWQUOTE] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_UPDATE_TRAILING_STOP_ON_NEWQUOTE] = Vendor.ALLOWED;
 
-            ruleSet[Rule.FUNCTION_USE_ONE_ROUTE] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_USE_ONE_ROUTE] = Vendor.ALLOWED;
 
             ruleSet[Rule.FUNCTION_BASE_CURRENCY] = account.Currency;
 
-            ruleSet[Rule.FUNCTION_ALLOW_ORDERS_HISTORY] = ExternalVendor.ExternalVendor.NOT_ALLOWED;
-            ruleSet[Rule.FUNCTION_ALLOW_TRADES_HISTORY] = ExternalVendor.ExternalVendor.ALLOWED;
+            ruleSet[Rule.FUNCTION_ALLOW_ORDERS_HISTORY] = Vendor.NOT_ALLOWED;
+            ruleSet[Rule.FUNCTION_ALLOW_TRADES_HISTORY] = Vendor.ALLOWED;
+            ruleSet[Rule.VALUE_EXPOSITION_IN_IMSTRUMENT_CURRENCY] = Vendor.ALLOWED;
 
             return ruleSet;
         }
@@ -974,55 +1019,55 @@ namespace OandaV20ExternalVendor
 
             return res;
         }
-
-        /// <summary>
-        /// List of supported history time frames
-        /// </summary>                
-        public override bool IsSupportedPeriod(int period)
-        {
-            switch (period)
-            {
-                case 5 * (int)HistoryPeriod.Second:
-                case 10 * (int)HistoryPeriod.Second:
-                case 15 * (int)HistoryPeriod.Second:
-                case 30 * (int)HistoryPeriod.Second:              
-                case (int)HistoryPeriod.Minute:
-                case 2 * (int)HistoryPeriod.Minute:
-                case 3 * (int)HistoryPeriod.Minute:
-                case 4 * (int)HistoryPeriod.Minute:
-                case 5 * (int)HistoryPeriod.Minute:
-                case 10 * (int)HistoryPeriod.Minute:
-                case 15 * (int)HistoryPeriod.Minute:
-                case 30 * (int)HistoryPeriod.Minute:
-                case (int)HistoryPeriod.Hour:
-                case 2 * (int)HistoryPeriod.Hour:
-                case 3 * (int)HistoryPeriod.Hour:
-                case 4 * (int)HistoryPeriod.Hour:
-                case 6 * (int)HistoryPeriod.Hour:
-                case 8 * (int)HistoryPeriod.Hour:
-                case 12 * (int)HistoryPeriod.Hour:
-                case (int)HistoryPeriod.Day:
-                case (int)HistoryPeriod.Week:
-                case (int)HistoryPeriod.Month:
-                    return true;
-            }
-
-            return false;
-        }
         
         /// <summary>
-        /// List of supported hostory data types
+        /// Information about history types and periods provided by integration
         /// </summary>        
-        public override HistoryDataTypes[] GetAllowedHistoryTypes()
+        public override HistoryMetadata GetHistoryMetadata()
         {
-            return new HistoryDataTypes[]
+            return new HistoryMetadata()
             {
-                HistoryDataTypes.Bid,
-                HistoryDataTypes.Ask,
-                HistoryDataTypes.BidAskAverage
+                //
+                // Supported history types
+                //
+                HistoryTypes = new HistoryDataTypes[]
+                {
+                    HistoryDataTypes.Bid,
+                    HistoryDataTypes.Ask,
+                    HistoryDataTypes.BidAskAverage
+                },
+                
+                //
+                // Supported periods
+                //
+                Periods = new int[]
+                {
+                    5 * (int)HistoryPeriod.Second,
+                    10 * (int)HistoryPeriod.Second,
+                    15 * (int)HistoryPeriod.Second,
+                    30 * (int)HistoryPeriod.Second,           
+                    (int)HistoryPeriod.Minute,
+                    2 * (int)HistoryPeriod.Minute,
+                    3 * (int)HistoryPeriod.Minute,
+                    4 * (int)HistoryPeriod.Minute,
+                    5 * (int)HistoryPeriod.Minute,
+                    10 * (int)HistoryPeriod.Minute,
+                    15 * (int)HistoryPeriod.Minute,
+                    30 * (int)HistoryPeriod.Minute,
+                    (int)HistoryPeriod.Hour,
+                    2 * (int)HistoryPeriod.Hour,
+                    3 * (int)HistoryPeriod.Hour,
+                    4 * (int)HistoryPeriod.Hour,
+                    6 * (int)HistoryPeriod.Hour,
+                    8 * (int)HistoryPeriod.Hour,
+                    12 * (int)HistoryPeriod.Hour,
+                    (int)HistoryPeriod.Day,
+                    (int)HistoryPeriod.Week,
+                    (int)HistoryPeriod.Month,
+                }
             };
         }
-              
+
         /// <summary>
         /// 
         /// </summary>    
@@ -1200,9 +1245,9 @@ namespace OandaV20ExternalVendor
             List<ReportMetaData> result = new List<ReportMetaData>();
 
             ReportMetaData reportType = new ReportMetaData((int)ReportTypeEnum.TransactionHistory, "Transaction history report");
-            reportType.Parameters.Add(new SettingItemAccountLookup(ExternalVendor.ExternalVendor.REPORT_TYPE_PARAMETER_ACCOUNT));
-            reportType.Parameters.Add(new SettingItemDateTimePicker(ExternalVendor.ExternalVendor.REPORT_TYPE_PARAMETER_DATETIME_FROM));
-            reportType.Parameters.Add(new SettingItemDateTimePicker(ExternalVendor.ExternalVendor.REPORT_TYPE_PARAMETER_DATETIME_TO));
+            reportType.Parameters.Add(new SettingItemAccountLookup(Vendor.REPORT_TYPE_PARAMETER_ACCOUNT));
+            reportType.Parameters.Add(new SettingItemDateTimePicker(Vendor.REPORT_TYPE_PARAMETER_DATETIME_FROM));
+            reportType.Parameters.Add(new SettingItemDateTimePicker(Vendor.REPORT_TYPE_PARAMETER_DATETIME_TO));
             result.Add(reportType);
 
             return result;
@@ -1215,14 +1260,14 @@ namespace OandaV20ExternalVendor
         {
             var accountsIdList = new List<string>();
 
-            string account = reportType.Parameters.Single(p => p.Name == ExternalVendor.ExternalVendor.REPORT_TYPE_PARAMETER_ACCOUNT).Value.ToString();
+            string account = reportType.Parameters.Single(p => p.Name == Vendor.REPORT_TYPE_PARAMETER_ACCOUNT).Value.ToString();
             if (string.IsNullOrEmpty(account))
                 accountsIdList.AddRange(accountsSummaryOanda.Select(a => a.Id));
             else
                 accountsIdList.Add(accountsSummaryOanda.Single(a => a.Name == account).Id);
 
-            DateTime from = (DateTime)reportType.Parameters.Single(p => p.Name == ExternalVendor.ExternalVendor.REPORT_TYPE_PARAMETER_DATETIME_FROM).Value;
-            DateTime to = (DateTime)reportType.Parameters.Single(p => p.Name == ExternalVendor.ExternalVendor.REPORT_TYPE_PARAMETER_DATETIME_TO).Value;
+            DateTime from = (DateTime)reportType.Parameters.Single(p => p.Name == Vendor.REPORT_TYPE_PARAMETER_DATETIME_FROM).Value;
+            DateTime to = (DateTime)reportType.Parameters.Single(p => p.Name == Vendor.REPORT_TYPE_PARAMETER_DATETIME_TO).Value;
 
             switch ((ReportTypeEnum)reportType.Id)
             {
@@ -1252,9 +1297,12 @@ namespace OandaV20ExternalVendor
             report.AddColumn("Type", AdditionalInfoItemComparingType.String);
             report.AddColumn("Order id", AdditionalInfoItemComparingType.String);
             report.AddColumn("Balance", AdditionalInfoItemComparingType.Double);
+            report.AddColumn("Financing", AdditionalInfoItemComparingType.Double);
             report.AddColumn("Account id", AdditionalInfoItemComparingType.String);
             report.AddColumn("Instrument", AdditionalInfoItemComparingType.String);
             report.AddColumn("Amount", AdditionalInfoItemComparingType.Double);
+            report.AddColumn("Side", AdditionalInfoItemComparingType.String);
+            report.AddColumn("P/L", AdditionalInfoItemComparingType.Double);
             report.AddColumn("Price", AdditionalInfoItemComparingType.Double);
             report.AddColumn("Reason", AdditionalInfoItemComparingType.String);
             report.AddColumn("TIF", AdditionalInfoItemComparingType.String);
@@ -1275,9 +1323,12 @@ namespace OandaV20ExternalVendor
                 reportRow.AddCell(transaction.TransactionType.ToString());
                 reportRow.AddCell(transaction.OrderID);
                 reportRow.AddCell(transaction.AccountBalance);
+                reportRow.AddCell(transaction.Financing);
                 reportRow.AddCell(transaction.AccountID);
                 reportRow.AddCell(instr != null ? instr.Name : string.Empty);
                 reportRow.AddCell(transaction.Amount);
+                reportRow.AddCell(transaction.Amount != 0 ? (transaction.Amount > 0 ? SideEnum.Buy : SideEnum.Sell).ToString() : string.Empty);
+                reportRow.AddCell(transaction.tradesClosed?.Count > 0 ? transaction.tradesClosed.Select(t => t.RealizedPL).Sum() : 0d);
                 reportRow.AddCell(transaction.Price);
                 reportRow.AddCell(transaction.Reason.ToString());
                 reportRow.AddCell(transaction.TimeInForce.ToString());
@@ -1372,7 +1423,7 @@ namespace OandaV20ExternalVendor
                 {
                     stopwatch.Start();
 
-                    var accountState = Rest.GetAccountState(account.Id, account.LastTransactionId.ToString());
+                    AccountState accountState = Rest.GetAccountState(account.Id, account.LastTransactionId.ToString());
 
                     stopwatch.Stop();
                     pingResult.State = PingEnum.Connected;
@@ -1389,7 +1440,7 @@ namespace OandaV20ExternalVendor
 
                             position.ServerCalculationNetPL = position.ServerCalculationGrossPL = item.UnrealizedPL;
 
-                            this.UpdatePosition(position);
+                            this.OnPositionUpdated(position);
                         }
                     }
 
@@ -1432,47 +1483,7 @@ namespace OandaV20ExternalVendor
 
                     accWrp.AccountTradeStatus = closeOutPercent < 90 ? AccountTradeStatusEnum.Active : AccountTradeStatusEnum.MarginWarning;
 
-                    accWrp.AccountAdditionalInfo = new List<AccountAdditionalInfoItem>()
-                    {
-                        new AccountAdditionalInfoItem()
-                        {
-
-                            GroupInfo = KEY_GENERAL_GROUP,
-                            SortIndex = 1000,
-                            NameKey = "Withdrawal limit",
-                            APIKey = "Withdrawal limit",
-                            ToolTipKey = "Withdrawal limit",
-                            Value = accountState.WithdrawalLimit,
-                            DataType = AdditionalInfoItemComparingType.Double,
-                            Visible = true,
-                            FormatingType = AccountAdditionalInfoItemFormatingType.AssetBalance
-                        },
-                        new AccountAdditionalInfoItem()
-                        {
-
-                            GroupInfo = KEY_GENERAL_GROUP,
-                            SortIndex = 1001,
-                            NameKey = "Position value",
-                            APIKey = "Position value",
-                            ToolTipKey = "Position value",
-                            Value = accountState.PositionValue,
-                            DataType = AdditionalInfoItemComparingType.Double,
-                            Visible = true,
-                            FormatingType = AccountAdditionalInfoItemFormatingType.AssetBalance
-                        },
-                        new AccountAdditionalInfoItem()
-                        {
-                            GroupInfo = KEY_MARGIN_GROUP,
-                            SortIndex = 1000,
-                            NameKey = "Margin closeout value",
-                            APIKey = "Margin closeout value",
-                            ToolTipKey = "Margin closeout value",
-                            Value = accountState.MarginCloseoutNAV,
-                            DataType = AdditionalInfoItemComparingType.Double,
-                            Visible = true,
-                            FormatingType = AccountAdditionalInfoItemFormatingType.AssetBalance
-                        }
-                     };
+                    OandaV20Utils.FillAccountAditionalInfo(accWrp, accountState);
 
                     //TodayResults
                     accWrp.RealizedPnl = realizedPnl;
@@ -1480,7 +1491,7 @@ namespace OandaV20ExternalVendor
                     accWrp.TodayTradesCount = tradesCount;
                     accWrp.TodayRebates = todayRebates;
 
-                    this.UpdateAccount(accWrp);
+                    this.OnAccountUpdated(accWrp);
                 }
             }
             catch (Exception ex)
@@ -1509,7 +1520,7 @@ namespace OandaV20ExternalVendor
             trade.Symbol = instrument != null ? instrument.Name : "";
             trade.SymbolType = instrument != null ? instrument.InstrumentType.ToString() : "";
             trade.TradeId = transaction.TransactionID;
-            trade.PnL = transaction.tradesClosed != null ? transaction.tradesClosed.Select(t => t.RealizedPL).Sum() : 0d;
+            trade.PnL = transaction.tradesClosed != null ? transaction.tradesClosed.Select(t => t.RealizedPL).Sum() : transaction.Pl;
             trade.Rebates = transaction.Financing;
 
             return trade;
@@ -1538,8 +1549,6 @@ namespace OandaV20ExternalVendor
                 eventSession.StartSession();
                 eventSession.DataReceived += TransactionSessionOnDataReceived;
                 eventStreamingSessions.Add(eventSession);
-
-                positions[accountSummary.Id] = new ConcurrentDictionary<string, Position>();
             }
         }
 
@@ -1607,7 +1616,7 @@ namespace OandaV20ExternalVendor
 
                         OandaV20Utils.SetSLTP(transaction, inst, order);
 
-                        this.UpdateOrder(order);
+                        this.OnOrderUpdated(order);
                     }
                     break;
 
@@ -1637,7 +1646,7 @@ namespace OandaV20ExternalVendor
 
                         OandaV20Utils.SetSLTP(transaction, inst, order);
 
-                        this.UpdateOrder(order);
+                        this.OnOrderUpdated(order);
                     }
                     break;
                 case TransactionType.StopOrder:
@@ -1650,7 +1659,7 @@ namespace OandaV20ExternalVendor
 
                         order.OrderId = transaction.TransactionID;
                         order.AccountId = transaction.AccountID;
-                        order.OrderType = ExternalVendor.OrderType.Stop;
+                        order.OrderType = OrderType.Stop;
 
                         order.Symbol = inst.Name.ToUpper();
                         order.Side = OandaV20Utils.GetSide(transaction.Amount);
@@ -1665,7 +1674,7 @@ namespace OandaV20ExternalVendor
 
                         OandaV20Utils.SetSLTP(transaction, inst, order);
 
-                        this.UpdateOrder(order);
+                        this.OnOrderUpdated(order);
                     }
                     break;
                 case TransactionType.TakeProfitOrder:
@@ -1703,7 +1712,7 @@ namespace OandaV20ExternalVendor
                         order.Status = transaction.Reason == TransactionReason.ClientOrder ? OrderStatus.New : OrderStatus.Replaced;
                         order.PositionId = transaction.TradeID;
 
-                        this.UpdateOrder(order);
+                        this.OnOrderUpdated(order);
                     }
                     break;
                 case TransactionType.StopLossOrder:
@@ -1738,7 +1747,7 @@ namespace OandaV20ExternalVendor
                         order.Status = transaction.Reason == TransactionReason.ClientOrder ? OrderStatus.New : OrderStatus.Replaced;
                         order.PositionId = transaction.TradeID;
 
-                        this.UpdateOrder(order);
+                        this.OnOrderUpdated(order);
                     }
                     break;
                 case TransactionType.TrailingStopLossOrder:
@@ -1773,7 +1782,7 @@ namespace OandaV20ExternalVendor
                         order.PositionId = transaction.TradeID;
                         order.LastUpdateTime = transaction.Time;
 
-                        this.UpdateOrder(order);
+                        this.OnOrderUpdated(order);
                     }
                     break;
 
@@ -1801,10 +1810,10 @@ namespace OandaV20ExternalVendor
                             order.LastUpdateTime = orderOanda.CreationTime;
                             order.Status = OrderStatus.Filled;
 
-                            this.OrderCanceledByServer(order);
+                            this.OnOrderCanceled(order);
                         }
                         else
-                            this.OrderCanceledByServer(new Order() { OrderId = transaction.OrderID, Status = OrderStatus.Filled });
+                            this.OnOrderCanceled(new Order() { OrderId = transaction.OrderID, Status = OrderStatus.Filled });
 
                         if (transaction.TradeOpened != null)
                         {
@@ -1824,7 +1833,7 @@ namespace OandaV20ExternalVendor
                                 trades[position.PositionId] = position;
                             }
 
-                            this.UpdatePosition(position);
+                            this.OnPositionUpdated(position);
                         }
 
                         if (transaction.tradeReduced != null)
@@ -1836,7 +1845,7 @@ namespace OandaV20ExternalVendor
                                 if (trades.TryGetValue(transaction.tradeReduced.TradeId, out position))
                                 {
                                     position.Quantity -= Math.Abs(transaction.tradeReduced.Amount);
-                                    this.PositionClosedByServer(position);
+                                    this.OnPositionClosed(position);
                                 }
                             }
                         }
@@ -1858,7 +1867,7 @@ namespace OandaV20ExternalVendor
                                     trades.TryRemove(trade.TradeId, out x);
                                 }
 
-                                this.PositionClosedByServer(position);
+                                this.OnPositionClosed(position);
                             }
                         }
 
@@ -1872,7 +1881,7 @@ namespace OandaV20ExternalVendor
                         if (orderToModify.Contains(transaction.OrderID))
                         {
                             orderToModify.Remove(transaction.OrderID);
-                            this.OrderCanceledByServer(new Order() { OrderId = transaction.OrderID });
+                            this.OnOrderCanceled(new Order() { OrderId = transaction.OrderID });
                             break;
                         }
 
@@ -1898,10 +1907,10 @@ namespace OandaV20ExternalVendor
                             order.LastUpdateTime = orderOanda.CreationTime;
                             order.Status = OrderStatus.Canceled;
 
-                            this.OrderCanceledByServer(order);
+                            this.OnOrderCanceled(order);
                         }
                         else
-                            this.OrderCanceledByServer(new Order() { OrderId = transaction.OrderID });
+                            this.OnOrderCanceled(new Order() { OrderId = transaction.OrderID });
                     }
                     break;
 

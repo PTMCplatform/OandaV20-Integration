@@ -52,7 +52,7 @@ namespace OandaV20ExternalVendor.TradeLibrary.DataTypes
         /// The Order must be immediately “Filled Or Killed”
         /// </summary>
         [EnumMember(Value = "FOK")]
-        FOC,
+        FOK,
         /// <summary>
         /// The Order must be “Immediatedly paritally filled Or Cancelled”
         /// </summary>
