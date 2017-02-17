@@ -322,9 +322,13 @@ namespace OandaV20ExternalVendor.TradeLibrary
                 {
                     var serializer = new DataContractJsonSerializer(typeof(T));
                     var stream = GetResponseStream(response);
-                    
+
                     return (T)serializer.ReadObject(stream);
                 }
+            }
+            catch (IOException ex)
+            {
+                throw ex.InnerException ?? ex;
             }
             catch (WebException ex)
             {

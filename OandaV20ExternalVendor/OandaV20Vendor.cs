@@ -67,6 +67,8 @@ namespace OandaV20ExternalVendor
         /// </summary>
         SemaphoreSlim historyThreadSemaphore = new SemaphoreSlim(10);
 
+        ConcurrentDictionary<string, ConcurrentDictionary<string, Order>> closeOrdersCache = new ConcurrentDictionary<string, ConcurrentDictionary<string, Order>>();
+
         #endregion
 
         #region Integration details
@@ -284,7 +286,7 @@ namespace OandaV20ExternalVendor
                 {"panel.positions.Net_PL.InstrumentCurrency", "Net P/L" },
                 {"panel.positions.Net_PL.InstrumentCurrency.descr", "Net P/L" },
                 {"panel.positions.PL_ticks", HIDDEN },
-                {"panel.positions.profit_usd", HIDDEN }
+                {"panel.positions.profit_usd", HIDDEN }              
             };
 
             return locale;
@@ -647,6 +649,7 @@ namespace OandaV20ExternalVendor
                 foreach (OrderOanda orderOanda in pendingOrders)
                 {
                     Order order = new Order();
+                    order.OrderId = orderOanda.Id;
                     order.Side = OandaV20Utils.GetSide(orderOanda.Amount);
                     order.Quantity = Math.Abs(orderOanda.Amount);
 
@@ -662,18 +665,22 @@ namespace OandaV20ExternalVendor
                         order.PositionId = orderOanda.TradeID;
                         order.Quantity = Math.Abs(tradeOanda.CurrentUnits);
                         order.Side = OandaV20Utils.GetSide(-tradeOanda.CurrentUnits);
+
+                        CacheCloseOrder(order);
                     }
 
                     InstrumentOanda inst;
                     if (!instruments.TryGetValue(instrumentKey, out inst))
                         continue;
-
-
-                    order.OrderId = orderOanda.Id;
+                    
                     order.AccountId = accountSummaryOanda.Id;
                     order.OrderType = OandaV20Utils.GetOrderType(orderOanda.OrderType);                    
                     order.Symbol = inst.Name.ToUpper();
-                    order.Price = orderOanda.Price != 0 ? orderOanda.Price : orderOanda.Distance;
+                    
+                    order.Price = orderOanda.Price;
+                    if (orderOanda.Distance != 0)
+                        SetOrderPriceFromDistance(orderOanda.Distance, order, inst);
+
                     order.Tiff = OandaV20Utils.GetTiff(orderOanda.TimeInForce);
                     order.ExpirationTime = orderOanda.GTDTime;
                     order.LastUpdateTime = orderOanda.CreationTime;
@@ -861,27 +868,27 @@ namespace OandaV20ExternalVendor
         /// </summary>      
         public override bool SubscribeSymbol(SubscribeQuotesParameters parameters)
         {
+            var result = false;
             if (parameters.subscribeType == SubscribeQuoteType.Level1)
             {
                 if (!subscribedLevel1Instruments.Contains(parameters.symbol))                
                     subscribedLevel1Instruments.Add(parameters.symbol);
-                                
-                return true;
-            }
 
-            if (parameters.subscribeType == SubscribeQuoteType.Level2)
+                result = true;
+            }
+            else if (parameters.subscribeType == SubscribeQuoteType.Level2)
             {
                 if (!subscribedLevel2Instruments.Contains(parameters.symbol))                
                     subscribedLevel2Instruments.Add(parameters.symbol);
-                
-                return true;
+
+                result = true;
             }
 
             Price price = null;
             if (lastQuoteCache.TryGetValue(parameters.symbol, out price))
                 ProcessQuote(price, parameters.symbol);
 
-            return false;
+            return result;
         }
 
         /// <summary>
@@ -1321,7 +1328,7 @@ namespace OandaV20ExternalVendor
 
                 reportRow.AddCell(transaction.Time);
                 reportRow.AddCell(transaction.TransactionType.ToString());
-                reportRow.AddCell(transaction.OrderID);
+                reportRow.AddCell(transaction.OrderID ?? transaction.TransactionID);
                 reportRow.AddCell(transaction.AccountBalance);
                 reportRow.AddCell(transaction.Financing);
                 reportRow.AddCell(transaction.AccountID);
@@ -1462,6 +1469,7 @@ namespace OandaV20ExternalVendor
                     }
 
                     AccountSummaryOanda accountSummary = Rest.GetAccountSummary(account.Id);
+                    account.LastTransactionId = accountSummary.LastTransactionId;
 
                     Account accWrp = new Account();
 
@@ -1581,7 +1589,7 @@ namespace OandaV20ExternalVendor
             string symbol = instruments.TryGetValue(price.InstrumentId, out instrument) ? instrument.Name : "";
             lastQuoteCache[symbol] = price;
 
-            ProcessQuote(price, symbol);
+            ProcessQuote(price, symbol, instrument.Id);
         }
 
         /// <summary>
@@ -1713,6 +1721,7 @@ namespace OandaV20ExternalVendor
                         order.PositionId = transaction.TradeID;
 
                         this.OnOrderUpdated(order);
+                        CacheCloseOrder(order);
                     }
                     break;
                 case TransactionType.StopLossOrder:
@@ -1748,6 +1757,7 @@ namespace OandaV20ExternalVendor
                         order.PositionId = transaction.TradeID;
 
                         this.OnOrderUpdated(order);
+                        CacheCloseOrder(order);
                     }
                     break;
                 case TransactionType.TrailingStopLossOrder:
@@ -1775,7 +1785,9 @@ namespace OandaV20ExternalVendor
                         order.AccountId = transaction.AccountID;
                         order.OrderType = OrderType.TrailingStop;
                         order.Symbol = inst.Name.ToUpper();
-                        order.Price = transaction.Distance;
+
+                        SetOrderPriceFromDistance(transaction.Distance * Math.Pow(10, inst.DisplayPrecision), order, inst);
+
                         order.Tiff = OandaV20Utils.GetTiff(transaction.TimeInForce);
                         order.ExpirationTime = transaction.GTDTime;
                         order.Status = transaction.Reason == TransactionReason.ClientOrder ? OrderStatus.New : OrderStatus.Replaced;
@@ -1783,6 +1795,7 @@ namespace OandaV20ExternalVendor
                         order.LastUpdateTime = transaction.Time;
 
                         this.OnOrderUpdated(order);
+                        CacheCloseOrder(order);
                     }
                     break;
 
@@ -1809,6 +1822,10 @@ namespace OandaV20ExternalVendor
                             order.ExpirationTime = orderOanda.GTDTime;
                             order.LastUpdateTime = orderOanda.CreationTime;
                             order.Status = OrderStatus.Filled;
+
+                            //закрывающий sl или tp
+                            if (transaction.tradesClosed != null && transaction.tradesClosed.Count == 1)
+                                order.PositionId = transaction.tradesClosed[0].TradeId;
 
                             this.OnOrderCanceled(order);
                         }
@@ -1845,7 +1862,21 @@ namespace OandaV20ExternalVendor
                                 if (trades.TryGetValue(transaction.tradeReduced.TradeId, out position))
                                 {
                                     position.Quantity -= Math.Abs(transaction.tradeReduced.Amount);
-                                    this.OnPositionClosed(position);
+                                    this.OnPositionUpdated(position);
+
+                                    ConcurrentDictionary<string, Order> listCloseOrders;
+                                    if (closeOrdersCache.TryGetValue(transaction.tradeReduced.TradeId, out listCloseOrders))
+                                    {
+                                        foreach (var order in listCloseOrders.Values)
+                                        {
+                                            order.Quantity = position.Quantity;
+
+                                            if(order.OrderType == OrderType.TrailingStop)
+                                                SetOrderPriceFromDistance(order.TrailingOffset, order, inst);
+
+                                            this.OnOrderUpdated(order);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1868,6 +1899,10 @@ namespace OandaV20ExternalVendor
                                 }
 
                                 this.OnPositionClosed(position);
+
+
+                                ConcurrentDictionary<string, Order> listCloseOrders;
+                                closeOrdersCache.TryRemove(trade.TradeId, out listCloseOrders);
                             }
                         }
 
@@ -1911,6 +1946,12 @@ namespace OandaV20ExternalVendor
                         }
                         else
                             this.OnOrderCanceled(new Order() { OrderId = transaction.OrderID });
+
+                        foreach (var listCloseOrders in closeOrdersCache.Values)
+                        {
+                            Order o;
+                            listCloseOrders.TryRemove(transaction.OrderID, out o);
+                        }
                     }
                     break;
 
@@ -1919,7 +1960,30 @@ namespace OandaV20ExternalVendor
             }
         }
 
-        private void ProcessQuote(Price price, string symbol)
+        private void CacheCloseOrder(Order order)
+        {
+            ConcurrentDictionary<string, Order> listCloseOrders;
+            if (!closeOrdersCache.TryGetValue(order.PositionId, out listCloseOrders))
+            {
+                listCloseOrders = new ConcurrentDictionary<string, Order>();
+                closeOrdersCache[order.PositionId] = listCloseOrders;
+            }
+
+            listCloseOrders[order.OrderId] = order;
+        }
+
+        private void SetOrderPriceFromDistance(double distance, Order order, InstrumentOanda inst)
+        {
+            order.TrailingOffset = distance;
+            Price price = null;
+            if (lastQuoteCache.TryGetValue(order.Symbol, out price) && price.Asks.Count > 0 && price.Bids.Count > 0)
+            {
+                var priceOffset = distance * Math.Pow(0.1, inst.DisplayPrecision);
+                order.Price = order.Side == SideEnum.Sell ? price.Bids[0].Price - priceOffset : price.Asks[0].Price + priceOffset;
+            }
+        }
+
+        private void ProcessQuote(Price price, string symbol, string instrumentId = null)
         {
             if (subscribedLevel1Instruments.Contains(symbol))
             {
@@ -1986,7 +2050,10 @@ namespace OandaV20ExternalVendor
             if (price.Asks.Count > 0 && price.Bids.Count > 0)
             {
                 string exp1, exp2;
-                OandaV20Utils.ExtractExp1Exp2(symbol, out exp1, out exp2, '/');
+                if(string.IsNullOrEmpty(instrumentId))
+                    OandaV20Utils.ExtractExp1Exp2(symbol, out exp1, out exp2, '/');
+                else
+                    OandaV20Utils.ExtractExp1Exp2(instrumentId, out exp1, out exp2);
 
                 this.SendCrossPrice(new CrossPrice()
                 {
